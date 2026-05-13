@@ -105,7 +105,10 @@ function proxyRemote(
   url: URL,
 ): Effect.Effect<HttpServerResponse.HttpServerResponse, never, Socket.WebSocketConstructor | Workspace.Service> {
   return Effect.gen(function* () {
-    const syncing = yield* Workspace.Service.use((svc) => svc.isSyncing(workspace.id))
+    // Wait for sync to become ready instead of immediately failing.
+    // This handles the race condition where the TUI requests session data
+    // before workspace syncing has completed initialization.
+    const syncing = yield* Workspace.Service.use((svc) => svc.waitForSyncReady(workspace.id))
     if (!syncing) {
       return HttpServerResponse.text(`broken sync connection for workspace: ${workspace.id}`, {
         status: 503,
