@@ -1,6 +1,7 @@
 import type {
   Hooks,
   PluginInput,
+  PluginLogger,
   Plugin as PluginInstance,
   PluginModule,
   WorkspaceAdapter as PluginWorkspaceAdapter,
@@ -94,6 +95,20 @@ function getLegacyPlugins(mod: Record<string, unknown>) {
   return result
 }
 
+/**
+ * Creates a namespaced logger for a plugin that writes to OpenCode's log system.
+ * @param pluginId - Identifier for the plugin (function name for internal, spec for external)
+ */
+function createPluginLogger(pluginId: string): PluginLogger {
+  const logger = Log.create({ service: `plugin.${pluginId}` })
+  return {
+    debug: (msg, extra) => logger.debug(msg, extra),
+    info: (msg, extra) => logger.info(msg, extra),
+    warn: (msg, extra) => logger.warn(msg, extra),
+    error: (msg, extra) => logger.error(msg, extra),
+  }
+}
+
 async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks: Hooks[]) {
   const plugin = readV1Plugin(load.mod, load.spec, "server", "detect")
   if (plugin) {
@@ -132,7 +147,9 @@ export const layer = Layer.effect(
           fetch: async (...args) => Server.Default().app.fetch(...args),
         })
         const cfg = yield* config.get()
-        const input: PluginInput = {
+
+        // Base input without logger - logger is added per-plugin
+        const baseInput = {
           client,
           project: ctx.project,
           worktree: ctx.worktree,
@@ -145,14 +162,23 @@ export const layer = Layer.effect(
           get serverUrl(): URL {
             return Server.url ?? new URL("http://localhost:4096")
           },
-          // @ts-expect-error
           $: typeof Bun === "undefined" ? undefined : Bun.$,
         }
 
+        // Helper to create plugin input with namespaced logger
+        function createPluginInput(pluginId: string): PluginInput {
+          return {
+            ...baseInput,
+            log: createPluginLogger(pluginId),
+          } as PluginInput
+        }
+
         for (const plugin of flags.disableDefaultPlugins ? [] : INTERNAL_PLUGINS) {
+          const pluginId = plugin.name || "internal"
+          const pluginInput = createPluginInput(pluginId)
           log.info("loading internal plugin", { name: plugin.name })
           const init = yield* Effect.tryPromise({
-            try: () => plugin(input),
+            try: () => plugin(pluginInput),
             catch: (err) => {
               log.error("failed to load internal plugin", { name: plugin.name, error: err })
             },
@@ -210,10 +236,13 @@ export const layer = Layer.effect(
         for (const load of loaded) {
           if (!load) continue
 
+          // Create plugin-specific input with namespaced logger
+          const pluginInput = createPluginInput(load.spec)
+
           // Keep plugin execution sequential so hook registration and execution
           // order remains deterministic across plugin runs.
           yield* Effect.tryPromise({
-            try: () => applyPlugin(load, input, hooks),
+            try: () => applyPlugin(load, pluginInput, hooks),
             catch: (err) => {
               const message = errorMessage(err)
               log.error("failed to load plugin", { path: load.spec, error: message })
