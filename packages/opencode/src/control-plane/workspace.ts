@@ -162,6 +162,7 @@ export interface Interface {
     signal?: AbortSignal,
   ) => Effect.Effect<void, WaitForSyncError>
   readonly startWorkspaceSyncing: (projectID: ProjectID) => Effect.Effect<void>
+  readonly waitForSyncReady: (workspaceID: WorkspaceID, timeout?: number) => Effect.Effect<boolean>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Workspace") {}
@@ -1019,6 +1020,50 @@ export const layer = Layer.effect(
       }
     })
 
+    const waitForSyncReady = Effect.fn("Workspace.waitForSyncReady")(function* (
+      workspaceID: WorkspaceID,
+      timeout: number = TIMEOUT,
+    ) {
+      // Fast path: already syncing
+      const alreadySyncing = yield* isSyncing(workspaceID)
+      if (alreadySyncing) return true
+
+      // Check current connection status
+      const connectionStatus = connections.get(workspaceID)
+
+      // If no status or error, fail fast - no point waiting
+      if (!connectionStatus || connectionStatus.status === "error") {
+        return false
+      }
+
+      // If already connected, recheck isSyncing (fiber may have started)
+      if (connectionStatus.status === "connected") {
+        return yield* isSyncing(workspaceID)
+      }
+
+      // Status is "connecting" or "disconnected" - wait for state change
+      const result = yield* Effect.catch(
+        waitEvent({
+          timeout,
+          fn(event) {
+            if (event.workspace !== workspaceID) return false
+            if (event.payload.type !== Event.Status.type) return false
+            const status = (event.payload.properties as ConnectionStatus).status
+            return status === "connected" || status === "error"
+          },
+        }),
+        () => Effect.succeed("timeout" as const),
+      )
+
+      if (result === "timeout") return false
+
+      // Check final status after event received
+      const finalStatus = connections.get(workspaceID)
+      if (finalStatus?.status !== "connected") return false
+
+      return yield* isSyncing(workspaceID)
+    })
+
     return Service.of({
       create,
       sessionWarp,
@@ -1030,6 +1075,7 @@ export const layer = Layer.effect(
       isSyncing,
       waitForSync,
       startWorkspaceSyncing,
+      waitForSyncReady,
     })
   }),
 )

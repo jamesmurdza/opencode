@@ -323,6 +323,7 @@ describe("HttpApi workspace routing middleware", () => {
         isSyncing: () => Effect.succeed(true),
         waitForSync: (id, state) => Ref.set(waited, { workspaceID: id, state }),
         startWorkspaceSyncing: () => Effect.die("unused"),
+        waitForSyncReady: () => Effect.succeed(true),
       })
 
       yield* HttpRouter.add("PATCH", "/probe", HttpServerResponse.text("route called")).pipe(
